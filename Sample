@@ -1,0 +1,448 @@
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Reflection;
+
+using HiKE.SmtCltServLib.Common;
+
+using HiKE.SmtCmnLib.DataObject;
+using HiKE.SmtCmnLib.DBEntity;
+
+using HiKE.SmtCsCmnPpLib.Log;
+using HiKE.SmtCsCmnPpLib.ComDevice;
+using HiKE.SmtCsCmnPpLib.DataControl;
+using HiKE.SmtCsCmnPpLib.Device;
+
+namespace HiKE.SmtCltServLib.LineControl
+{
+    /// <summary>
+    /// 応援情報設定機能クラス
+    /// </summary>
+    /// <remarks>
+    /// 応援情報設定テーブルの取得とシステム情報設定要求(応援情報設定)を行うクラス
+    /// </remarks>
+    public class SetSupport : AbstractServiceBase
+    {
+        #region メンバ変数             
+        /// <summary>
+        /// 設定要求データオブジェクト
+        /// </summary>
+        private RequestSystemParameterSettingDataObject setSupportObj = null;
+
+        /// <summary>
+        /// 応援設定エンティティ
+        /// </summary>
+        private SetSupportEntity setSupportEntity = null;
+
+        /// <summary>
+        /// SMTクライアント制御クラス
+        /// </summary>
+        public ISMTClientControl clientContorol = null;
+
+        /// <summary>
+        /// 電文受信時実行タスク
+        /// </summary>
+        private Task receiveTask = new Task(ReceiveTask);
+
+        private DataObjectBase receiveDO = null;
+
+        #endregion
+
+        #region プロパティ
+        /// <summary>
+        /// インスタンス
+        /// </summary>
+        private static SetSupport Instance { get; set; }
+
+        #endregion
+
+        #region コンストラクタ
+        /// <summary>
+        /// コンストラクタ
+        /// </summary>   
+        /// <param name="smtClientControl">SMTクライアント制御のインスタンス</param>  
+        public SetSupport(ISMTClientControl smtClientControl) : base(smtClientControl,true)
+        {
+            //インスタンスをセット
+            Instance = this;
+
+            // SMTクライアント制御クラスを取得
+            this.clientContorol = smtClientControl;
+
+        }
+        #endregion
+
+        #region 応援設定情報取得
+        /// <summary>
+        /// 応援設定情報取得
+        /// </summary>
+        /// <returns>ステータス、エラー理由、DB参照データ</returns>
+        public ProcessingResult AsyncGetTable()
+        {
+            //戻り値の初期化
+            ProcessingResult result = new ProcessingResult(ProcessingResult.StatusSuccess, string.Empty, null);
+
+            try
+            {
+                // 処理開始ログ
+                AppLogger.OpeLog(OpeLogTiming.Method, LevelCategory.Info, MethodBase.GetCurrentMethod().Name);
+
+                // DBデータ取得処理
+                result = GetTable();
+
+                // 結果返却
+                return result;
+            }
+            catch (Exception e)
+            {
+                // エラーログ
+                AppLogger.FltLog(FltLogTiming.ExpContinue, LevelCategory.Error, e.Message);
+
+                // 結果をセット
+                result.Status = ProcessingResult.StatusFailed;
+                result.AddMessage(e.Message);
+
+                // 結果を返却
+                return result;
+            }
+        }
+        #endregion
+
+        #region 応援設定要求
+        /// <summary>
+        /// 応援設定要求
+        /// </summary>
+        /// <param name="settingKind">設定種別(0:追加・更新,1:削除)</param>
+        /// <param name="section">応援受入区分</param>
+        /// <param name="mode">設定モード</param>
+        /// <returns>ステータス、エラー理由、DB参照データ</returns>
+        public ProcessingResult AsyncRequest(int settingKind, int section, int mode)
+        {
+
+            //戻り値の初期化
+            ProcessingResult result = new ProcessingResult(ProcessingResult.StatusSuccess, string.Empty, null);
+
+            this.receiveDO = null;
+
+            try
+            {
+                // 処理開始ログ
+                AppLogger.OpeLog(OpeLogTiming.Method, LevelCategory.Info, MethodBase.GetCurrentMethod().Name,
+                    "settingKind", settingKind,
+                    "section", section,
+                    "mode", mode);
+
+                // 引数チェックの戻り値の初期化
+                ProcessingResult rtn = new ProcessingResult(ProcessingResult.StatusSuccess, string.Empty, null);
+
+                // 引数チェック
+                rtn = ValidationArgs(section, mode);
+
+                // 引数チェックが失敗した場合
+                if (rtn.Status != ProcessingResult.StatusSuccess)
+                {
+                    // エラーログ
+                    AppLogger.FltLog(FltLogTiming.ExpContinue, LevelCategory.Error, rtn.ErrorMessage);
+
+                    // 結果をセット
+                    result.Status = ProcessingResult.StatusValidError;
+                    result.AddMessage(rtn.ErrorMessage);
+
+                    // 結果を返却
+                    return result;
+                }
+
+                // データオブジェクトのインスタンスを作成
+                this.setSupportObj = new RequestSystemParameterSettingDataObject();
+
+                // 応援設定エンティティのインスタンスを作成
+                this.setSupportEntity = new SetSupportEntity();
+
+                // 応援設定エンティティのプロパティに引数をセット
+                this.setSupportEntity.Set(section, mode);
+
+                // システム情報(CSV形式)作成
+                this.setSupportEntity.CreateSystemInfo();
+
+                // データオブジェクトのサブヘッダーを設定
+                this.setSupportObj.SetSubHeader(TelegramCode.HeaderKibanSyubetuSosinmoto, TelegramCode.HeaderKibanSyubetuZyusinsaki, TelegramCode.HeaderDanBangoSosinmoto,
+                TelegramCode.HeaderSlotIDSosinmoto, TelegramCode.HeaderDanBangoSosinSaki, TelegramCode.HeaderSlotIDJyusinSaki, TelegramCode.HeaderYobi0);
+
+                // データオブジェクトの中にエンティティを設定
+                this.setSupportObj.SetBody(SetSupportEntity.SystemInfoKind, this.setSupportEntity.SystemInfoBlockNo, settingKind, this.setSupportEntity.SystemInfo);
+
+                // タイムアウト監視開始
+                StartTimeOutMonitorAsync();
+
+                // 送信処理
+                bool sendResult = this.clientContorol.SMTServerSend(this.setSupportObj);
+
+                // 送信結果が失敗だった場合
+                if (!sendResult)
+                {
+                    // エラーログ
+                    AppLogger.FltLog(FltLogTiming.ExpContinue, LevelCategory.Error, MessageConst.ErrSend);
+
+                    // 結果をセット
+                    result.Status = ProcessingResult.StatusFailed;
+                    result.AddMessage(MessageConst.ErrSend);
+
+                    // 結果を返却
+                    return result;
+                }
+
+                // 応答電文待ち
+                // SMTServerReceiveTask:受信イベントが完了
+                // TimeOutTask:タイムアウトスレッドが完了
+                Task.WaitAny(this.receiveTask, this.timeOutTask);
+
+                //タイムアウト
+                if (this.receiveDO == null)
+                {
+                    result.Status = ProcessingResult.StatusFailed;
+                    result.AddMessage(MessageConst.ErrTimeOut);
+
+                    // エラーログ
+                    AppLogger.OpeLog(OpeLogTiming.TimeOut, LevelCategory.Warn, MessageConst.ErrTimeOut);
+
+                    //タイムアウトスレッドが完了したら、タイムアウトエラーを返却
+                    return result;
+                }
+
+                //受信成功
+                if (this.receiveDO is ResponseSystemParameterSettingDataObject setResponseObj)
+                {
+                    // 受信結果判定
+
+                    // 設定結果_Serverが「3:排他中」だった場合
+                    if (setResponseObj.ResultSmtSvr == TelegramCode.ResultExclution)
+                    {
+                        // エラーログ
+                        AppLogger.FltLog(FltLogTiming.ExpContinue, LevelCategory.Error, MessageConst.ErrExclution);
+
+                        // 結果をセット
+                        result.Status = ProcessingResult.StatusFailed;
+                        result.AddMessage(MessageConst.ErrExclution);
+
+                        // 結果を返却
+                        return result;
+                    }
+
+                    // 設定結果_Serverが失敗だった場合、または設定結果_LCUが失敗だった場合
+                    else if (setResponseObj.ResultSmtSvr != TelegramCode.ResultSuccess &&
+                        setResponseObj.ResultLcu != TelegramCode.ResultSuccess)
+                    {
+                        // エラーログ
+                        AppLogger.FltLog(FltLogTiming.ExpContinue, LevelCategory.Error, MessageConst.ErrSysParam);
+
+                        // 結果をセット
+                        result.Status = ProcessingResult.StatusFailed;
+                        result.AddMessage(MessageConst.ErrSysParam);
+
+                        // 結果を返却
+                        return result;
+                    }
+                }
+                // 受信電文のキャストに失敗した場合
+                else
+                {
+                    // エラーログ
+                    AppLogger.FltLog(FltLogTiming.ExpContinue, LevelCategory.Error, MessageConst.ErrReceiveFail);
+
+                    // 結果をセット
+                    result.Status = ProcessingResult.StatusFailed;
+                    result.AddMessage(MessageConst.ErrReceiveFail);
+
+                    // 結果を返却
+                    return result;
+                }
+
+                //送受信が完了したら、DBテーブルを取得
+                result = GetTable();
+
+                //DBテーブルの取得が成功していたらマスターを更新
+                if (result.Status == ProcessingResult.StatusSuccess)
+                {
+                    SettingDBMaster.Set(TableNameConst.SettingSupportCom, result.SelectData);
+                }
+
+                // 結果返却
+                return result;
+            }
+            catch (Exception e)
+            {
+                // エラーログ
+                AppLogger.FltLog(FltLogTiming.ExpContinue, LevelCategory.Error, e.Message);
+
+                // 結果をセット
+                result.Status = ProcessingResult.StatusFailed;
+                result.AddMessage(e.Message);
+
+                // 結果を返却
+                return result;
+            }
+        }
+        #endregion
+
+        #region 電文解析情報リスト設定
+
+        /// <summary>
+        /// 電文解析情報リスト設定
+        /// </summary>
+        /// <returns></returns>
+        /// <remarks>
+        /// 電文解析情報リストに受信イベントを設定する。
+        /// </remarks>
+        protected override List<(string, string,ReceiveActionEventHandler)> GetInterpreterInfos()
+        {
+            // 共通機能設定イベント
+            return new List<(string code, string sysInfoKind,ReceiveActionEventHandler methodHandler)>
+            {
+                 // 通信先選択(受信)
+                (TelegramCode.MSSA,SetSupportEntity.SystemInfoKind.ToString(),receive)
+            };
+        }
+        #endregion
+
+        /// <summary>
+        /// 受信イベント
+        /// </summary>
+        /// <param name="entity"></param>
+        /// <returns></returns>
+        public bool receive(DataObjectBase entity)
+        {
+            this.receiveDO = entity;
+
+            /// タイムアウト監視取り消し
+            CancelTimeOutMonitor();
+
+
+            this.receiveTask.Start();
+            return true;
+        }
+
+        #region プライベートメソッド
+
+        #region テーブル参照
+
+        /// <summary>
+        /// テーブル参照
+        /// </summary>
+        /// <returns>ステータス、エラー理由、DB参照データ</returns>
+        private ProcessingResult GetTable()
+        {
+            // 戻り値の初期化
+            ProcessingResult result = new ProcessingResult(ProcessingResult.StatusSuccess, string.Empty, null);
+
+            try
+            {
+                // 処理開始ログ
+                AppLogger.OpeLog(OpeLogTiming.Method, LevelCategory.Info, MethodBase.GetCurrentMethod().Name);
+
+                // DBから取得するデータ
+                DataTable DbData = new DataTable();
+
+                // DBEntityクラス呼び出し
+                using (DbModelContext db = new DbModelContext())
+                {
+                    // DB接続先を設定
+                    db.SetAccess(this.clientContorol.GetDBAccess());
+
+                    // DBSetを作成
+                    var dbset = db.SettingSupportCom;
+
+                    //DbsetからDataTableに変換する
+                    DbData = SettingDBMaster.DbsetToDataTable<SettingSupportCom>(dbset);
+
+                }
+
+                // 結果をセット
+                result.SetData(DbData);
+
+                // 処理を終了
+                return result;
+            }
+            catch (Exception e)
+            {
+                // エラーログ
+                AppLogger.FltLog(FltLogTiming.ExpContinue, LevelCategory.Error, e.Message);
+
+                // 結果をセット
+                result.Status = ProcessingResult.StatusFailed;
+                result.AddMessage(e.Message);
+
+                // 結果を返却
+                return result;
+            }
+        }
+
+        #endregion
+
+        #region 引数チェック
+        /// <summary>
+        /// 引数チェック
+        /// </summary>
+        /// <param name="section">応援受入区分</param>
+        /// <param name="mode">設定モード</param>
+        /// <returns>ステータス、エラー理由、DB参照データ</returns>
+        public ProcessingResult ValidationArgs(int section, int mode)
+        {
+            //戻り値の初期化
+            ProcessingResult result = new ProcessingResult(ProcessingResult.StatusSuccess, string.Empty, null);
+
+            // 処理開始ログ
+            AppLogger.OpeLog(OpeLogTiming.Method, LevelCategory.Info, MethodBase.GetCurrentMethod().Name,
+                    "section", section,
+                    "mode", mode);
+
+            // 応援受入区分設定が"0"の場合、設定モードが"1"または"4"以外の場合エラー
+            if (section.Equals((int)ValidationConst.SP_Section.SP_Section00))
+            {
+                if (!Validation.ValidationInt(mode, (int)ValidationConst.SP_Mode.SP_Mode01, (int)ValidationConst.SP_Mode.SP_Mode04))
+                {
+                    result.Status = ProcessingResult.StatusValidError;
+                    result.AddMessage(MessageConst.ErrSetSupportMode0);
+                }
+
+                if (mode.Equals((int)ValidationConst.SP_Mode.SP_Mode02) || mode.Equals((int)ValidationConst.SP_Mode.SP_Mode03))
+                {
+                    result.Status = ProcessingResult.StatusValidError;
+                    result.AddMessage(MessageConst.ErrSetSupportMode0);
+                }
+
+            }
+            // 応援受入区分設定が"1"の場合、設定モードが"1","2","3"以外の場合エラー
+            else if (section.Equals((int)ValidationConst.SP_Section.SP_Section01))
+            {
+                if(!Validation.ValidationInt(mode, (int)ValidationConst.SP_Mode.SP_Mode01,  (int)ValidationConst.SP_Mode.SP_Mode03))
+                {
+                    result.Status = ProcessingResult.StatusValidError;
+                    result.AddMessage(MessageConst.ErrSetSupportMode1);
+                }
+            }
+            // 応援受入区分設定が"0","1"のどちらでもない場合、チェックNGでエラー
+            else
+            {                
+                result.Status = ProcessingResult.StatusValidError;
+                result.AddMessage(MessageConst.ErrSetSupportSection);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// 受信時タスク
+        /// </summary>
+        private static void ReceiveTask()
+        {
+        }
+        #endregion
+
+        #endregion
+    }
+}
